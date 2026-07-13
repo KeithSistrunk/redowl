@@ -15,9 +15,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 import yaml
+
+_LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
 
 
 @dataclass
@@ -152,6 +155,20 @@ def is_blocklisted(base_url: str, blocklist: list[str]) -> str | None:
         if entry and entry in base_url:
             return entry
     return None
+
+
+def transport_warning(base_url: str) -> str | None:
+    """Return a warning if base_url would send the API key over plaintext HTTP to a non-local host."""
+    parsed = urlparse(base_url)
+    if parsed.scheme == "https":
+        return None
+    hostname = (parsed.hostname or "").lower()
+    if hostname in _LOCAL_HOSTNAMES or hostname.startswith("127."):
+        return None
+    return (
+        f"'{base_url}' uses '{parsed.scheme or 'no scheme'}', not https, and is not localhost -- "
+        "the API key for this target will be sent in plaintext over the network."
+    )
 
 
 class RateLimiter:

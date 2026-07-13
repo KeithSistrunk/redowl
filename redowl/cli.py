@@ -78,6 +78,12 @@ def run_command(args: argparse.Namespace) -> int:
 
     blocked_entry = runner.is_blocklisted(config.base_url, config.blocklist)
 
+    for warning in filter(None, [
+        runner.transport_warning(config.base_url),
+        runner.transport_warning(config.judge.base_url) if config.judge.enabled else None,
+    ]):
+        print(f"WARNING: {warning}", file=sys.stderr)
+
     _write_audit_log_entry(
         args.audit_log,
         {
