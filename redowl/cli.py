@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,11 +22,20 @@ from redowl.reporter import now_utc_iso
 from redowl.runner import ConfigError
 
 
+def _restrict_to_owner(path: Path) -> None:
+    """Best-effort: restrict a file's permissions to the owner only. No-op where the OS doesn't support it."""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def _write_audit_log_entry(audit_log_path: Path, entry: dict) -> None:
     """Append one JSON line to the audit log, creating the file/parents if needed."""
     audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     with audit_log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _restrict_to_owner(audit_log_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -135,8 +145,10 @@ def run_command(args: argparse.Namespace) -> int:
     report = reporter.build_report(findings, meta)
 
     reporter.write_json_report(report, args.out)
+    _restrict_to_owner(args.out)
     md_path = args.out.with_suffix(".md")
     reporter.write_markdown_report(report, md_path)
+    _restrict_to_owner(md_path)
 
     counts = report["summary"]["counts"]
     print(
