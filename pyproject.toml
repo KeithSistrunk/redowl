@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling==1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "redowl"
+version = "0.1.0"
+description = "MVP CLI for testing a single LLM endpoint's prompt-injection and jailbreak resistance."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests==2.32.3",
+    "PyYAML==6.0.2",
+    "python-dotenv==1.2.2",
+]
+
+[project.scripts]
+redowl = "redowl.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["redowl"]
