@@ -7,6 +7,13 @@ recognized in config but raise NotImplementedError, reserved for phase 2.
 Judge provider decision (Q2): the judge LLM uses the same provider/format as the
 target (also OpenAI-compatible), but can point at a different base_url, api key,
 and model via the ``judge:`` block in the target config.
+
+Phase 2.0 addition (see Phase 2.0 build prompt Q1): the reasoning LLM used by
+`redowl hunt` is, like the target and judge, OpenAI-compatible first. It reuses
+``call_openai_endpoint`` unchanged via ``call_reasoning`` below -- no new HTTP
+client code, no new dependency. ``ReasoningConfig`` is a separate, narrower
+dataclass from ``TargetConfig`` because the reasoning LLM has no system prompt
+of its own (agent.py supplies one per call), no judge, and no blocklist.
 """
 
 from __future__ import annotations
@@ -76,6 +83,20 @@ class RawResponse:
     raw: dict[str, Any] | None
 
 
+@dataclass
+class ReasoningConfig:
+    """Configuration for the reasoning LLM used by `redowl hunt` to pick attacks."""
+
+    name: str
+    endpoint_format: str
+    base_url: str
+    api_key_env: str
+    model: str
+    timeout_seconds: float
+    requests_per_second: float
+    source_file: str
+
+
 class ConfigError(Exception):
     """Raised when a target or test-case YAML file is missing required fields."""
 
@@ -118,6 +139,33 @@ def load_target_config(path: Path) -> TargetConfig:
         requests_per_second=float(rate_limit.get("requests_per_second", 1.0)),
         blocklist=list(data.get("blocklist", [])),
         judge=judge,
+        source_file=str(path),
+    )
+
+
+def load_reasoning_config(path: Path) -> ReasoningConfig:
+    """Parse a reasoning-LLM config YAML file (for `redowl hunt`) into a ReasoningConfig."""
+    with path.open("r", encoding="utf-8") as f:
+        try:
+            data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
+
+    required = ["name", "endpoint_format", "base_url", "api_key_env", "model"]
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ConfigError(f"{path}: missing required field(s): {', '.join(missing)}")
+
+    rate_limit = data.get("rate_limit") or {}
+
+    return ReasoningConfig(
+        name=data["name"],
+        endpoint_format=data["endpoint_format"],
+        base_url=data["base_url"].rstrip("/"),
+        api_key_env=data["api_key_env"],
+        model=data["model"],
+        timeout_seconds=float(data.get("timeout_seconds", 30.0)),
+        requests_per_second=float(rate_limit.get("requests_per_second", 1.0)),
         source_file=str(path),
     )
 
@@ -258,6 +306,29 @@ def call_target(config: TargetConfig, prompt: str) -> RawResponse:
     raise NotImplementedError(
         f"endpoint_format '{config.endpoint_format}' is not implemented in this MVP; "
         "only 'openai' is supported. 'anthropic' and 'generic' are planned for phase 2."
+    )
+
+
+def call_reasoning(config: ReasoningConfig, system_prompt: str, user_prompt: str) -> RawResponse:
+    """Call the reasoning LLM endpoint used by `redowl hunt`.
+
+    Only 'openai' endpoint_format is implemented (Phase 2.0 Q1 decision) --
+    reuses call_openai_endpoint unchanged, same as call_target does for the
+    target endpoint.
+    """
+    if config.endpoint_format == "openai":
+        return call_openai_endpoint(
+            base_url=config.base_url,
+            api_key_env=config.api_key_env,
+            model=config.model,
+            system_prompt=system_prompt,
+            prompt=user_prompt,
+            timeout_seconds=config.timeout_seconds,
+        )
+    raise NotImplementedError(
+        f"endpoint_format '{config.endpoint_format}' is not implemented for the reasoning LLM in "
+        "this phase; only 'openai' is supported. Anthropic's Claude API is not OpenAI-compatible "
+        "and is deferred to a later phase (see Phase 2.0 build prompt Q1)."
     )
 
 
