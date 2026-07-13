@@ -1,0 +1,13 @@
+# Hosted OpenAI-compatible reasoning-LLM config for `redowl hunt`.
+# Set REDOWL_REASONING_API_KEY before running (env var or .env file) -- see
+# README "Hunt mode" section.
+
+name: "openai-reasoning"
+endpoint_format: openai        # only 'openai' is implemented for the reasoning LLM in Phase 2.0
+base_url: "https://api.openai.com/v1"
+api_key_env: "REDOWL_REASONING_API_KEY"
+model: "gpt-5"
+timeout_seconds: 30
+
+rate_limit:
+  requests_per_second: 1

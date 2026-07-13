@@ -1,0 +1,20 @@
+# Local Ollama reasoning-LLM config for `redowl hunt` (Phase 2.0 Q1 decision:
+# OpenAI-compatible providers are supported first for the reasoning LLM;
+# Anthropic's Claude `messages` API is not OpenAI-compatible and is deferred
+# to a later phase -- see README "Hunt mode" section).
+#
+# Uses the same local Ollama server as examples/ollama.yaml, so a full hunt
+# (target + reasoning) can run entirely offline with no real API key. Ollama
+# ignores the API key entirely, but the OpenAI-compatible client still
+# requires an Authorization header, so REDOWL_REASONING_API_KEY is set to a
+# dummy value in .env, same pattern as OPENAI_API_KEY for examples/ollama.yaml.
+
+name: "ollama-llama3.2-reasoning"
+endpoint_format: openai        # Ollama's /v1/chat/completions is OpenAI-compatible
+base_url: "http://localhost:11434/v1"
+api_key_env: "REDOWL_REASONING_API_KEY"
+model: "llama3.2"
+timeout_seconds: 60            # local inference can be slower than a hosted API
+
+rate_limit:
+  requests_per_second: 1
