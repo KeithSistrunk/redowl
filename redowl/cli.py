@@ -120,7 +120,8 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    findings = [evaluate(case, raw, config.judge) for case, raw in results]
+    judge_limiter = runner.RateLimiter(config.judge.requests_per_second) if config.judge.enabled else None
+    findings = [evaluate(case, raw, config.judge, judge_limiter) for case, raw in results]
 
     meta = {
         "target_name": config.name,

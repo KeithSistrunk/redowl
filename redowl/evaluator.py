@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from redowl.runner import JudgeConfig, RawResponse, TestCase, call_openai_endpoint
+from redowl.runner import JudgeConfig, RateLimiter, RawResponse, TestCase, call_openai_endpoint
 
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict security evaluator for an LLM red-team test harness. "
@@ -122,7 +122,12 @@ def call_judge(judge_config: JudgeConfig, test_case: TestCase, response_text: st
     return Verdict.UNCERTAIN, raw.text
 
 
-def evaluate(test_case: TestCase, raw_response: RawResponse, judge_config: JudgeConfig | None = None) -> Finding:
+def evaluate(
+    test_case: TestCase,
+    raw_response: RawResponse,
+    judge_config: JudgeConfig | None = None,
+    judge_rate_limiter: RateLimiter | None = None,
+) -> Finding:
     """Produce a Finding for one test case, applying deterministic rules then an optional judge."""
     if raw_response.error or raw_response.text is None:
         return Finding(
@@ -145,6 +150,8 @@ def evaluate(test_case: TestCase, raw_response: RawResponse, judge_config: Judge
     wants_judge = method == "regex_and_judge"
 
     if verdict is None and wants_judge and judge_config is not None and judge_config.enabled:
+        if judge_rate_limiter is not None:
+            judge_rate_limiter.wait()
         judge_verdict, judge_evidence = call_judge(judge_config, test_case, raw_response.text)
         verdict = judge_verdict
         rule_fired = "llm_judge"

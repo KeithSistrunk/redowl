@@ -32,6 +32,7 @@ class JudgeConfig:
     api_key_env: str
     model: str
     timeout_seconds: float = 30.0
+    requests_per_second: float = 1.0
 
 
 @dataclass
@@ -89,6 +90,8 @@ def load_target_config(path: Path) -> TargetConfig:
     if missing:
         raise ConfigError(f"{path}: missing required field(s): {', '.join(missing)}")
 
+    rate_limit = data.get("rate_limit") or {}
+
     judge_data = data.get("judge") or {}
     judge = JudgeConfig(
         enabled=bool(judge_data.get("enabled", False)),
@@ -96,9 +99,10 @@ def load_target_config(path: Path) -> TargetConfig:
         api_key_env=judge_data.get("api_key_env", data["api_key_env"]),
         model=judge_data.get("model", data["model"]),
         timeout_seconds=float(judge_data.get("timeout_seconds", 30.0)),
+        requests_per_second=float(
+            judge_data.get("requests_per_second", rate_limit.get("requests_per_second", 1.0))
+        ),
     )
-
-    rate_limit = data.get("rate_limit") or {}
 
     return TargetConfig(
         name=data["name"],
