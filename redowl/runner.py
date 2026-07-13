@@ -83,7 +83,10 @@ class ConfigError(Exception):
 def load_target_config(path: Path) -> TargetConfig:
     """Parse a target config YAML file into a TargetConfig."""
     with path.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        try:
+            data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
 
     required = ["name", "endpoint_format", "base_url", "api_key_env", "model"]
     missing = [key for key in required if key not in data]
@@ -131,7 +134,10 @@ def load_test_cases(tests_dir: Path) -> list[TestCase]:
     cases: list[TestCase] = []
     for path in paths:
         with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            try:
+                data = yaml.safe_load(f) or {}
+            except yaml.YAMLError as exc:
+                raise ConfigError(f"{path}: invalid YAML: {exc}") from exc
 
         required = ["id", "category", "description", "prompt", "expected_safe_behavior", "evaluation"]
         missing = [key for key in required if key not in data]
