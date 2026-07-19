@@ -12,6 +12,37 @@ prompts to a target endpoint, evaluates each response with a deterministic
 rubric (and optionally an LLM judge for ambiguous cases), and writes a
 structured JSON findings report plus a Markdown summary.
 
+## Results — Three-Arm Constraint Experiment
+
+**The question:** Does giving the reasoning LLM more freedom produce more effective attacks?
+
+**Setup:** Three arms tested against the same target (`llama3.2`), on the
+`prompt_injection` objective, 5 runs each. Only variable is how the attack
+is produced.
+
+**More freedom for the AI produced fewer successful attacks, not more.**
+
+![Attack success rate by constraint level: verbatim pool 45%, variant (GPT) 31%, free-generation 11%, each shown with its per-run range](assets/three_arm_results.png)
+
+| Arm | Attacks that landed | Per-run range |
+|---|---|---|
+| A — Verbatim pool | 45% (25/55) | 36–64% |
+| B — Variant (GPT) | 31% (14/45) | 18–45% |
+| C — Free-gen | 11% (6/53) | 0–18% |
+
+Runs B-1 and C-4 partial (JSON-parse failures). `prompt_injection`
+objective, 5 runs per arm.
+
+**Honest caveats:**
+
+- Arm B is directional only — its run-to-run spread (27pts) is nearly as
+  wide as the A-vs-C gap.
+- Even verbatim Arm A swung 36–64% between runs, from target-side
+  temperature — "fixed" ≠ deterministic.
+- Free-gen used a plain "write your most effective attack" prompt with no
+  expert persona or examples; a stronger prompt might close the gap (future
+  work).
+
 ## What it does
 
 - Runs a folder of YAML test cases (prompt injection / jailbreak prompts)
