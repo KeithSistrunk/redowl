@@ -95,6 +95,14 @@ class ReasoningConfig:
     timeout_seconds: float
     requests_per_second: float
     source_file: str
+    # None (the default) omits the field from the request entirely -- same
+    # behavior as before this field existed. Phase 2.1's variant rewording
+    # (redowl/agent.py's generate_variant()) needs this set to something
+    # nonzero: at temperature 0 every "variant" of a given pool item comes
+    # back byte-identical whenever the prompt is otherwise the same (e.g.
+    # iteration 1 of two different hunt runs), which would make the
+    # three-arm experiment's variant arm look artificially noise-free.
+    temperature: float | None = None
 
 
 class ConfigError(Exception):
@@ -167,6 +175,7 @@ def load_reasoning_config(path: Path) -> ReasoningConfig:
         timeout_seconds=float(data.get("timeout_seconds", 30.0)),
         requests_per_second=float(rate_limit.get("requests_per_second", 1.0)),
         source_file=str(path),
+        temperature=float(data["temperature"]) if "temperature" in data else None,
     )
 
 
@@ -257,12 +266,28 @@ def _api_key(env_var: str) -> str:
     return key
 
 
-def call_openai_endpoint(base_url: str, api_key_env: str, model: str, system_prompt: str | None, prompt: str, timeout_seconds: float) -> RawResponse:
-    """Call an OpenAI-compatible /chat/completions endpoint with a single user prompt."""
+def call_openai_endpoint(
+    base_url: str,
+    api_key_env: str,
+    model: str,
+    system_prompt: str | None,
+    prompt: str,
+    timeout_seconds: float,
+    temperature: float | None = None,
+) -> RawResponse:
+    """Call an OpenAI-compatible /chat/completions endpoint with a single user prompt.
+
+    temperature is omitted from the request body entirely when None -- same
+    behavior as before this parameter existed, so the target and judge call
+    sites (which never pass it) are unaffected."""
     messages: list[dict[str, str]] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
+
+    body: dict[str, Any] = {"model": model, "messages": messages}
+    if temperature is not None:
+        body["temperature"] = temperature
 
     started = time.monotonic()
     try:
@@ -270,7 +295,7 @@ def call_openai_endpoint(base_url: str, api_key_env: str, model: str, system_pro
         resp = requests.post(
             f"{base_url}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages},
+            json=body,
             timeout=timeout_seconds,
         )
         latency_ms = (time.monotonic() - started) * 1000
@@ -324,6 +349,7 @@ def call_reasoning(config: ReasoningConfig, system_prompt: str, user_prompt: str
             system_prompt=system_prompt,
             prompt=user_prompt,
             timeout_seconds=config.timeout_seconds,
+            temperature=config.temperature,
         )
     raise NotImplementedError(
         f"endpoint_format '{config.endpoint_format}' is not implemented for the reasoning LLM in "

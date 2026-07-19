@@ -17,7 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from redowl import agent, goals, reporter, runner
+from redowl import agent, goals, guardrails, reporter, runner
 from redowl.evaluator import evaluate
 from redowl.reporter import now_utc_iso
 from redowl.runner import ConfigError
@@ -37,6 +37,17 @@ def _write_audit_log_entry(audit_log_path: Path, entry: dict) -> None:
     with audit_log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     _restrict_to_owner(audit_log_path)
+
+
+def _write_jsonl_entry(path: Path, entry: dict) -> None:
+    """Append one JSON line to a JSONL log (e.g. the free-generation attempt
+    log), creating the file/parents if needed. Same shape as
+    _write_audit_log_entry, kept separate because the two logs have
+    different lifecycles and callers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _restrict_to_owner(path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,6 +114,34 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("redowl_audit.log.jsonl"),
         type=Path,
         help="Path to the audit log file (JSON Lines, appended). Default: ./redowl_audit.log.jsonl",
+    )
+    hunt_parser.add_argument(
+        "--free-generate",
+        action="store_true",
+        dest="free_generate",
+        help=(
+            "Phase 2.2: have the reasoning LLM free-write attacks for --goal instead of picking "
+            "from the fixed pool. Every generated attack is screened through redowl.guardrails."
+            "screen() before it reaches the target; a rejected attack halts the hunt. Requires a "
+            "disposable, network-isolated target -- see redowl/guardrails.py's "
+            "SANDBOX_REQUIREMENTS, printed as a warning before the hunt starts. Writes an "
+            "additional JSONL log of every attempt next to --out (same stem, .jsonl suffix)."
+        ),
+    )
+    hunt_parser.add_argument(
+        "--variants",
+        action="store_true",
+        dest="variants",
+        help=(
+            "EXPERIMENTAL (Phase 2.1): have the reasoning LLM pick a pool attack AND reword its "
+            "text, instead of sending it verbatim. The reworded text is screened through "
+            "redowl.guardrails.screen() with category=--goal (e.g. 'prompt_injection'), not "
+            "self-declared. Mutually exclusive with --free-generate. Verbatim pool (no flag) "
+            "remains the default; this flag exists to support the pool/variant/free-gen three-arm "
+            "comparison -- see scripts/run_three_arm_experiment.py. Writes the same additional "
+            "JSONL log as --free-generate, with pool_text/variant_text side by side for manual "
+            "drift review."
+        ),
     )
 
     return parser
@@ -208,6 +247,10 @@ def hunt_command(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if args.free_generate and args.variants:
+        print("ERROR: --free-generate and --variants are mutually exclusive.", file=sys.stderr)
+        return 2
+
     operator = args.operator or getpass.getuser()
 
     try:
@@ -226,11 +269,17 @@ def hunt_command(args: argparse.Namespace) -> int:
     ]):
         print(f"WARNING: {warning}", file=sys.stderr)
 
+    if args.free_generate:
+        return _hunt_free_generate(args, target_config, reasoning_config, operator, blocked_entry)
+
     try:
         goal, pool = goals.load_goal(args.goals_dir, args.goal)
     except ConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    if args.variants:
+        return _hunt_variants(args, target_config, reasoning_config, goal, pool, operator, blocked_entry)
 
     max_iterations = args.max_iterations if args.max_iterations is not None else goal.default_max_iterations
     hunt_id = str(uuid.uuid4())
@@ -326,6 +375,292 @@ def hunt_command(args: argparse.Namespace) -> int:
     print(
         f"Done. {len(result.iterations)} iteration(s), terminated: {result.termination.reason}. "
         f"Wrote {args.out} and {md_path}."
+    )
+    return 0
+
+
+def _hunt_free_generate(
+    args: argparse.Namespace,
+    target_config: runner.TargetConfig,
+    reasoning_config: runner.ReasoningConfig,
+    operator: str,
+    blocked_entry: str | None,
+) -> int:
+    """Free-generation branch of `redowl hunt --free-generate` (Phase 2.2).
+
+    Mirrors hunt_command's pool-mode flow (audit logging, blocklist gate,
+    JSON + Markdown report) but routes through agent.run_hunt_free_generate
+    instead of agent.run_hunt, and additionally writes a JSONL log of every
+    screened attempt -- Task 3 of the Phase 2.2 handoff brief. --goal is not
+    validated here against guardrails.ALLOWED_CATEGORIES: an invalid category
+    is caught by screen() itself on the first iteration (a hard block), which
+    is the one place that allowlist is actually enforced.
+    """
+    known_tool_ids = goals.load_all_pool_ids(args.goals_dir)
+    session = guardrails.SessionState(known_tool_ids=known_tool_ids)
+
+    hunt_id = str(uuid.uuid4())
+    max_iterations = (
+        args.max_iterations if args.max_iterations is not None else agent.DEFAULT_FREE_GEN_MAX_ITERATIONS
+    )
+    jsonl_path = args.out.with_suffix(".jsonl")
+
+    _write_audit_log_entry(
+        args.audit_log,
+        {
+            "timestamp_utc": now_utc_iso(),
+            "event": "hunt_start",
+            "hunt_id": hunt_id,
+            "mode": "free_generate",
+            "operator": operator,
+            "goal": args.goal,
+            "target_name": target_config.name,
+            "target_base_url": target_config.base_url,
+            "reasoning_llm": reasoning_config.name,
+            "max_iterations": max_iterations,
+            "out_path": str(args.out),
+            "jsonl_log_path": str(jsonl_path),
+            "known_tool_ids_count": len(known_tool_ids),
+            "authorized_flag_present": True,
+            "blocked": blocked_entry is not None,
+            "blocked_by_entry": blocked_entry,
+        },
+    )
+
+    if blocked_entry is not None:
+        print(
+            f"ERROR: target base_url '{target_config.base_url}' matches blocklist entry "
+            f"'{blocked_entry}'. Refusing to run.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not known_tool_ids:
+        print(
+            f"WARNING: no attack pools found under {args.goals_dir} -- known_tool_ids is empty, "
+            "so guardrails.screen()'s fabrication check will be skipped, not enforced.",
+            file=sys.stderr,
+        )
+
+    print("PRE-FLIGHT -- confirm before this hunt starts (not enforceable from code):", file=sys.stderr)
+    print(guardrails.SANDBOX_REQUIREMENTS, file=sys.stderr)
+
+    print(
+        f"Free-generating attacks for goal '{args.goal}' against '{target_config.name}' "
+        f"({target_config.base_url}) using reasoning LLM '{reasoning_config.name}', "
+        f"up to {max_iterations} iteration(s)..."
+    )
+
+    def on_iteration(hunt_id: str, iteration: agent.FreeGenIteration) -> None:
+        _write_audit_log_entry(
+            args.audit_log,
+            {
+                "timestamp_utc": now_utc_iso(),
+                "event": "hunt_iteration",
+                "hunt_id": hunt_id,
+                "mode": "free_generate",
+                "goal": args.goal,
+                "target": target_config.name,
+                "reasoning_llm": reasoning_config.name,
+                "iteration_number": iteration.iteration_number,
+                "guardrail_allowed": iteration.guardrail_allowed,
+                "guardrail_needs_review": iteration.guardrail_needs_review,
+                "guardrail_flags": iteration.guardrail_flags,
+                "target_response_length": iteration.target_response_length,
+                "eval_verdict": iteration.eval_verdict,
+                "reasoning_latency_ms": iteration.reasoning_latency_ms,
+            },
+        )
+        _write_jsonl_entry(jsonl_path, agent.free_gen_jsonl_record(hunt_id, hunt_id, iteration))
+
+    result = agent.run_hunt_free_generate(
+        target_config,
+        reasoning_config,
+        goal_cycle=[args.goal],
+        max_iterations=max_iterations,
+        session=session,
+        on_iteration=on_iteration,
+        hunt_id=hunt_id,
+    )
+
+    _write_audit_log_entry(
+        args.audit_log,
+        {
+            "timestamp_utc": now_utc_iso(),
+            "event": "hunt_end",
+            "hunt_id": result.hunt_id,
+            "mode": "free_generate",
+            "goal": args.goal,
+            "target": target_config.name,
+            "reasoning_llm": reasoning_config.name,
+            "termination_reason": result.termination.reason,
+            "termination_detail": result.termination.detail,
+            "iteration_count": len(result.iterations),
+        },
+    )
+
+    meta = {
+        "target_name": target_config.name,
+        "target_base_url": target_config.base_url,
+        "target_model": target_config.model,
+        "run_timestamp_utc": now_utc_iso(),
+        "operator": operator,
+        "goal": args.goal,
+        "judge_enabled": target_config.judge.enabled,
+    }
+    report = agent.build_free_gen_report(result, meta, session)
+
+    reporter.write_json_report(report, args.out)
+    _restrict_to_owner(args.out)
+    md_path = args.out.with_suffix(".md")
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(agent.render_free_gen_markdown(report), encoding="utf-8")
+    _restrict_to_owner(md_path)
+
+    print(
+        f"Done. {len(result.iterations)} attempt(s), terminated: {result.termination.reason}. "
+        f"Wrote {args.out}, {md_path}, and {jsonl_path}."
+    )
+    return 0
+
+
+def _hunt_variants(
+    args: argparse.Namespace,
+    target_config: runner.TargetConfig,
+    reasoning_config: runner.ReasoningConfig,
+    goal: goals.GoalDefinition,
+    pool: list[runner.TestCase],
+    operator: str,
+    blocked_entry: str | None,
+) -> int:
+    """Pool + variants branch of `redowl hunt --variants` (Phase 2.1, EXPERIMENTAL).
+
+    Reuses the free-generation plumbing (on_iteration JSONL callback, sandbox
+    banner) but keeps the pool/goal loading `--free-generate` skips, since
+    generate_variant() needs the pool's actual attack text to reword and
+    screen()'s category comes from the pool item, not the harness or the
+    model. auto_approve_screened stays False here too, same as free-gen --
+    the brief's case for flipping it (the enum bounds what can be attempted)
+    is real, but that's a decision for after a review pass on real output,
+    not a CLI default.
+    """
+    known_tool_ids = goals.load_all_pool_ids(args.goals_dir)
+    session = guardrails.SessionState(known_tool_ids=known_tool_ids)
+
+    hunt_id = str(uuid.uuid4())
+    max_iterations = args.max_iterations if args.max_iterations is not None else goal.default_max_iterations
+    jsonl_path = args.out.with_suffix(".jsonl")
+
+    _write_audit_log_entry(
+        args.audit_log,
+        {
+            "timestamp_utc": now_utc_iso(),
+            "event": "hunt_start",
+            "hunt_id": hunt_id,
+            "mode": "variants",
+            "operator": operator,
+            "goal": goal.name,
+            "target_name": target_config.name,
+            "target_base_url": target_config.base_url,
+            "reasoning_llm": reasoning_config.name,
+            "max_iterations": max_iterations,
+            "out_path": str(args.out),
+            "jsonl_log_path": str(jsonl_path),
+            "authorized_flag_present": True,
+            "blocked": blocked_entry is not None,
+            "blocked_by_entry": blocked_entry,
+        },
+    )
+
+    if blocked_entry is not None:
+        print(
+            f"ERROR: target base_url '{target_config.base_url}' matches blocklist entry "
+            f"'{blocked_entry}'. Refusing to run.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print("PRE-FLIGHT -- confirm before this hunt starts (not enforceable from code):", file=sys.stderr)
+    print(guardrails.SANDBOX_REQUIREMENTS, file=sys.stderr)
+
+    print(
+        f"Generating variants of goal '{goal.name}' pool attacks against '{target_config.name}' "
+        f"({target_config.base_url}) using reasoning LLM '{reasoning_config.name}', "
+        f"up to {max_iterations} iteration(s)... [EXPERIMENTAL: Phase 2.1]"
+    )
+
+    def on_iteration(hunt_id: str, iteration: agent.VariantIteration) -> None:
+        _write_audit_log_entry(
+            args.audit_log,
+            {
+                "timestamp_utc": now_utc_iso(),
+                "event": "hunt_iteration",
+                "hunt_id": hunt_id,
+                "mode": "variants",
+                "goal": goal.name,
+                "target": target_config.name,
+                "reasoning_llm": reasoning_config.name,
+                "iteration_number": iteration.iteration_number,
+                "attack_id": iteration.attack_id,
+                "fallback_used": iteration.fallback_used,
+                "guardrail_allowed": iteration.guardrail_allowed,
+                "guardrail_needs_review": iteration.guardrail_needs_review,
+                "guardrail_flags": iteration.guardrail_flags,
+                "target_response_length": iteration.target_response_length,
+                "eval_verdict": iteration.eval_verdict,
+                "reasoning_latency_ms": iteration.reasoning_latency_ms,
+            },
+        )
+        _write_jsonl_entry(jsonl_path, agent.variant_jsonl_record(hunt_id, hunt_id, iteration))
+
+    result = agent.run_hunt_variants(
+        target_config,
+        reasoning_config,
+        goal,
+        pool,
+        max_iterations=max_iterations,
+        session=session,
+        on_iteration=on_iteration,
+        hunt_id=hunt_id,
+    )
+
+    _write_audit_log_entry(
+        args.audit_log,
+        {
+            "timestamp_utc": now_utc_iso(),
+            "event": "hunt_end",
+            "hunt_id": result.hunt_id,
+            "mode": "variants",
+            "goal": goal.name,
+            "target": target_config.name,
+            "reasoning_llm": reasoning_config.name,
+            "termination_reason": result.termination.reason,
+            "termination_detail": result.termination.detail,
+            "iteration_count": len(result.iterations),
+        },
+    )
+
+    meta = {
+        "target_name": target_config.name,
+        "target_base_url": target_config.base_url,
+        "target_model": target_config.model,
+        "run_timestamp_utc": now_utc_iso(),
+        "operator": operator,
+        "goal": goal.name,
+        "judge_enabled": target_config.judge.enabled,
+    }
+    report = agent.build_variant_report(result, meta, session)
+
+    reporter.write_json_report(report, args.out)
+    _restrict_to_owner(args.out)
+    md_path = args.out.with_suffix(".md")
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(agent.render_variant_markdown(report), encoding="utf-8")
+    _restrict_to_owner(md_path)
+
+    print(
+        f"Done. {len(result.iterations)} attempt(s), terminated: {result.termination.reason}. "
+        f"Wrote {args.out}, {md_path}, and {jsonl_path}."
     )
     return 0
 

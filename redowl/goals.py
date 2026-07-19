@@ -89,6 +89,27 @@ def load_goal(goals_root: Path, goal_name: str) -> tuple[GoalDefinition, list[Te
     return definition, attacks
 
 
+def load_all_pool_ids(goals_root: Path) -> set[str]:
+    """Collect every attack id across every goal's pool under goals_root.
+
+    Used as the known-tool-ids registry for guardrails.SessionState in
+    free-generation hunts (see redowl/guardrails.py): a free-generated attack
+    that references an id outside this set is a fabricated reference. Best
+    effort -- a goal directory with no attacks/ subdir or invalid YAML is
+    skipped rather than failing the whole registry build, since this is a
+    reference set for a secondary check, not a required load path.
+    """
+    ids: set[str] = set()
+    if not goals_root.is_dir():
+        return ids
+    for goal_dir, _definition_path in _iter_goal_dirs(goals_root):
+        try:
+            ids.update(attack.id for attack in load_attack_pool(goal_dir))
+        except ConfigError:
+            continue
+    return ids
+
+
 def is_goal_achieved(success_criteria: dict[str, Any], verdict: Verdict) -> bool:
     """Check whether one attack's verdict satisfies the goal's success criteria.
 

@@ -260,6 +260,141 @@ direct equivalent existed (`PI-DIRECT-01`, `PI-FAKESYS-01`,
 `PI-INDIRECT-01`, `PI-PERSONA-01`, `PI-FICTION-01`), with new attacks filling
 out the rest of the pool.
 
+## Pool + variants hunt mode (Phase 2.1, EXPERIMENTAL)
+
+`redowl hunt --variants` sits between the two: the reasoning LLM still picks
+one attack by ID from the fixed pool (the same pool-membership kill-switch
+as plain `hunt` applies — an invalid ID halts the hunt with an "error"
+reason, never retried), but it also rewords that attack's own text before
+sending it. The output contract extends the pool envelope rather than
+replacing it:
+
+```json
+{"choice": "PI-001", "variant": "<reworded attack text>", "rationale": "<why>"}
+```
+
+An empty or absent `variant` falls back to the pool item's text verbatim
+(`fallback_used: true` on that iteration) rather than erroring the hunt. The
+reworded text is screened through `redowl.guardrails.screen()` with
+`category=--goal` (e.g. `prompt_injection`) — sourced from the goal, not
+self-declared by the model and not the pool item's own fine-grained
+technique label (`PI-001`'s `category` field is `direct_override`, not one
+of the five broad categories `screen()` checks against).
+
+```bash
+redowl hunt \
+  --target examples/ollama.yaml \
+  --reasoning examples/ollama.yaml \
+  --goal prompt_injection \
+  --out variants_hunt.json \
+  --variants \
+  --i-am-authorized-to-test
+```
+
+Point `--reasoning` at a config with a **nonzero temperature** for this mode
+— `examples/reasoning-ollama-variants.yaml` sets `0.9`. At temperature 0 the
+model's rewording of a given pool item comes back byte-identical run to run,
+which defeats the point of measuring variant behavior at all.
+
+Whether a variant drifted into a materially different attack isn't cheaply
+checkable — an LLM judge would just be another model self-reporting, the same
+problem restated. `variants_hunt.jsonl` logs `pool_text` and `variant_text`
+side by side for every attempt so that can be hand-sampled instead of
+guessed at automatically.
+
+## Free-generation hunt mode (Phase 2.2)
+
+`redowl hunt --free-generate` replaces the fixed-pool picker above with a
+reasoning LLM that writes attack text from scratch for the `--goal` you give
+it (one of `prompt_injection`, `jailbreak`, `data_leakage`,
+`system_prompt_extraction`, `policy_bypass`). Every generated attack is
+screened by `redowl/guardrails.py`'s `screen()` before it ever reaches the
+target:
+
+- **Hard blocks** (credential-shaped strings, an oversized attack, a
+  category outside the five above, or a reference to an id not found in any
+  goal's attack pool) halt the hunt immediately — kill-switch semantics, not
+  a skip-and-continue.
+- **Review flags** (egress-intent phrasing, high imperative density, no
+  category assigned) don't block the attack, they're surfaced alongside it —
+  attack text is inert data sent to a chatbot, not code that executes, so the
+  control that actually matters is sandboxing the target (see below), not
+  pattern-matching the prompt.
+
+```bash
+redowl hunt \
+  --target examples/ollama.yaml \
+  --reasoning examples/reasoning-ollama.yaml \
+  --goal prompt_injection \
+  --max-iterations 8 \
+  --out freegen_hunt.json \
+  --free-generate \
+  --i-am-authorized-to-test
+```
+
+This writes `freegen_hunt.json`, `freegen_hunt.md`, and — new for this
+mode — `freegen_hunt.jsonl`, one line per attack attempt (allowed or
+rejected) with its verdict, flags, target response, and evaluator outcome.
+The JSON/Markdown report's `hunt` section additionally carries a
+`guardrail_summary` (attempts/allowed/rejected/needs_review counts, a flag
+histogram, and the session's end-state fabrication/novel-attack counters).
+
+**Before the first free-generation run against a real target**, confirm what
+no code in `guardrails.py` can enforce (printed as a warning banner every
+time this mode runs): the target LLM holds no live credentials or production
+tool access, there's no network egress except the sandboxed target endpoint,
+the environment is disposable, and the target's own tool-calling is off
+unless tool-misuse is the explicit test goal.
+
+`scripts/run_three_run_protocol.py` runs the three-run comparison protocol
+used to validate the category allowlist: two runs with a harness-assigned
+category (baseline + variance check) and one run with no category at all
+(unconstrained), same target/attack-count/session-limits held constant
+across all three. It writes three JSONL logs plus a `summary.md` comparing
+allowed/rejected/eval-outcome counts across the runs, and lists run 3's
+attack text for manual classification against the five-category taxonomy
+rather than guessing at it automatically:
+
+```bash
+python scripts/run_three_run_protocol.py \
+  --target examples/ollama.yaml \
+  --reasoning examples/reasoning-ollama.yaml \
+  --attack-count 15 \
+  --out-dir three_run_protocol_out \
+  --i-am-authorized-to-test
+```
+
+## Three-arm experiment: verbatim pool vs. variant vs. free-generation
+
+`scripts/run_three_arm_experiment.py` compares all three hunt modes at the
+category level — verbatim pool (2.0, every pool attack sent once, no
+reasoning LLM involved since there's no picking decision to make), variant
+(2.1), and free-generation (2.2) — same target, same attack count, same
+session limits per category, only the constraint varies:
+
+```bash
+python scripts/run_three_arm_experiment.py \
+  --target examples/ollama.yaml \
+  --reasoning examples/reasoning-ollama.yaml \
+  --reasoning-variants examples/reasoning-ollama-variants.yaml \
+  --runs-per-arm 2 \
+  --out-dir three_arm_experiment_out \
+  --i-am-authorized-to-test
+```
+
+**Coverage gap:** only `goals/prompt-injection/` has an attack pool in this
+repo today, so Arms A and B (which need a pool to draw from) run only for
+`prompt_injection`; Arm C (free-gen needs no pool) runs for all five
+categories. `summary.md` reports this gap explicitly rather than quietly
+comparing three arms on one category. Building pools for the other four
+categories would turn this into the full five-category comparison — a
+content-authoring decision, not something the script works around.
+
+**Statistical honesty:** trial counts per arm-category cell are small (pool
+size × `--runs-per-arm`, e.g. 11 × 2 = 22). `summary.md` reports results as
+directional and calls out that differences under roughly a 20-point spread
+aren't distinguishable from noise at this scale.
+
 ## Safety mechanisms
 
 - `--i-am-authorized-to-test` is required or the CLI exits with an error

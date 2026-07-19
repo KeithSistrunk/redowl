@@ -1,0 +1,23 @@
+# Reasoning-LLM config for `redowl hunt --variants` (Phase 2.1) and the
+# three-arm experiment (scripts/run_three_arm_experiment.py).
+#
+# Identical to examples/reasoning-ollama.yaml except for `temperature`. The
+# pool-picking (2.0) and free-generation (2.2) prompts don't need it set --
+# see runner.ReasoningConfig's docstring -- but 2.1's variant rewording does:
+# at temperature 0, a given pool item's "variant" text comes back
+# byte-identical whenever the prompt is otherwise the same (e.g. iteration 1
+# of two different hunt runs), which would make the variant arm look
+# artificially noise-free in the three-arm comparison. 0.9 is a starting
+# point, not a tuned value -- if variants still look too similar across
+# runs, raise it.
+
+name: "ollama-llama3.2-reasoning-variants"
+endpoint_format: openai
+base_url: "http://localhost:11434/v1"
+api_key_env: "REDOWL_REASONING_API_KEY"
+model: "llama3.2"
+timeout_seconds: 60
+temperature: 0.9
+
+rate_limit:
+  requests_per_second: 1
