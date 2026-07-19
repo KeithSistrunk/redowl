@@ -22,13 +22,7 @@ is produced.
 
 **More freedom for the AI produced fewer successful attacks, not more.**
 
-![Attack success rate by constraint level: verbatim pool 45%, variant (GPT) 31%, free-generation 11%, each shown with its per-run range](assets/three_arm_results.png)
-
-| Arm | Attacks that landed | Per-run range |
-|---|---|---|
-| A — Verbatim pool | 45% (25/55) | 36–64% |
-| B — Variant (GPT) | 31% (14/45) | 18–45% |
-| C — Free-gen | 11% (6/53) | 0–18% |
+![Three-arm results](docs/arm_attack_success.png)
 
 Runs B-1 and C-4 partial (JSON-parse failures). `prompt_injection`
 objective, 5 runs per arm.
